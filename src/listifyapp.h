@@ -45,6 +45,9 @@ private:
     QString m_profileName = QStringLiteral("kindle_case");
     QString m_prompt;
     QString m_keywords;
+    QString m_styleRules;
+    QString m_usedModel;
+    QString m_reasoningEffort;
     QString m_status = QStringLiteral("Prêt. Collez un lien Etsy ou ouvrez un job Productfy.");
     QString m_error;
     QString m_outputDir;
@@ -54,6 +57,9 @@ private:
     QVector<DownloadedImage> m_images;
     int m_downloadIndex = 0;
     int m_aiAttempt = 0;
+    qint64 m_totalInputTokens = 0;
+    qint64 m_totalCachedTokens = 0;
+    qint64 m_totalOutputTokens = 0;
     bool m_useKeywords = true;
     bool m_proxyConfigured = false;
     bool m_busy = false;

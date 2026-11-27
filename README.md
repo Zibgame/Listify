@@ -23,6 +23,7 @@ profiles/
     profile.json
     seo_generator.txt
     keyword.txt
+    listing_style.txt
 ```
 
 `keyword.txt` est facultatif dans le workflow. Le profil Kindle fourni est une copie des fichiers de `C:\Users\faniz\Documents\Kindle_Case` au moment de la compilation.
@@ -41,6 +42,7 @@ output/<listing_id>/
   input/
     seo_prompt.txt
     keywords.txt
+    listing_style.txt
   result/
     name.txt
     title.txt
@@ -65,7 +67,10 @@ Variables lues depuis `.env`, le projet voisin `Orderify`, puis le `.env` de Moc
 - `ETSY_API_KEY` et éventuellement `ETSY_SECRET`
 - `PROXY_HOST`, `PROXY_PORT`, `PROXY_USERNAME`, `PROXY_PASSWORD`
 - `OPENAI_API_KEY`
-- `OPENAI_SEO_MODEL` facultatif, valeur par défaut `gpt-5.5`
+- `OPENAI_SEO_MODEL` facultatif, valeur par défaut `gpt-6.2-astra`
+- `OPENAI_REASONING_EFFORT` facultatif, valeur par défaut `high`
+
+Le fichier `result/generation_info.json` indique le modèle, l'effort, le nombre de tentatives, les tokens réellement consommés et une estimation du coût texte standard pour les modèles connus.
 
 Sans proxy valide, Listify refuse toute connexion réseau directe.
 

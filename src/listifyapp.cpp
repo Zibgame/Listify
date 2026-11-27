@@ -206,6 +206,7 @@ void ListifyApp::startWorkflow()
     if (m_prompt.trimmed().isEmpty()) { m_error = QStringLiteral("Prompt SEO du profil introuvable."); refresh(); return; }
     m_busy = true; m_error.clear(); m_result = {}; m_images.clear(); m_imageUrls.clear(); m_listing = {};
     m_outputDir.clear(); m_shopName.clear(); m_downloadIndex = 0; m_aiAttempt = 0;
+    m_totalInputTokens = 0; m_totalCachedTokens = 0; m_totalOutputTokens = 0;
     m_status = QStringLiteral("Récupération de la fiche Etsy %1...").arg(m_listingId); refresh();
     fetchListing();
 }
@@ -305,6 +306,7 @@ bool ListifyApp::prepareOutput()
     QFile artwork(QString::fromUtf8(m_artworkInput));
     if (!artwork.open(QIODevice::ReadOnly) || !writeBytes(QDir(m_outputDir).filePath(QStringLiteral("source/productfy_artwork.png")), artwork.readAll(), &error)) { fail(QStringLiteral("Output"), error); return false; }
     writeText(QDir(m_outputDir).filePath(QStringLiteral("input/seo_prompt.txt")), m_prompt);
+    writeText(QDir(m_outputDir).filePath(QStringLiteral("input/listing_style.txt")), m_styleRules);
     if (m_useKeywords) writeText(QDir(m_outputDir).filePath(QStringLiteral("input/keywords.txt")), m_keywords);
     return true;
 }
@@ -348,8 +350,12 @@ void ListifyApp::callOpenAi(const QString &correction)
                 {QStringLiteral("minLength"), 450}, {QStringLiteral("maxLength"), 500}}}}},
         {QStringLiteral("required"), QJsonArray{QStringLiteral("title"), QStringLiteral("description"), QStringLiteral("tags"), QStringLiteral("image_filename"), QStringLiteral("alt_text")}},
         {QStringLiteral("additionalProperties"), false}};
-    const QJsonObject body{{QStringLiteral("model"), qEnvironmentVariable("OPENAI_SEO_MODEL", QStringLiteral("gpt-5.5"))},
-        {QStringLiteral("instructions"), m_prompt}, {QStringLiteral("store"), false},
+    m_usedModel = qEnvironmentVariable("OPENAI_SEO_MODEL", QStringLiteral("gpt-6.2-astra")).trimmed();
+    m_reasoningEffort = qEnvironmentVariable("OPENAI_REASONING_EFFORT", QStringLiteral("high")).trimmed().toLower();
+    const QString instructions = m_prompt + QStringLiteral("\n\n") + m_styleRules;
+    const QJsonObject body{{QStringLiteral("model"), m_usedModel},
+        {QStringLiteral("instructions"), instructions}, {QStringLiteral("store"), false},
+        {QStringLiteral("reasoning"), QJsonObject{{QStringLiteral("effort"), m_reasoningEffort}}},
         {QStringLiteral("max_output_tokens"), 10000},
         {QStringLiteral("input"), QJsonArray{QJsonObject{{QStringLiteral("role"), QStringLiteral("user")}, {QStringLiteral("content"), content}}}},
         {QStringLiteral("text"), QJsonObject{{QStringLiteral("format"), QJsonObject{
@@ -364,6 +370,11 @@ void ListifyApp::callOpenAi(const QString &correction)
         const QByteArray data = reply->readAll(); const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QString networkError = reply->errorString();
         const bool ok = reply->error() == QNetworkReply::NoError && status >= 200 && status < 300; reply->deleteLater();
+        const auto responseObject = QJsonDocument::fromJson(data).object();
+        const auto usage = responseObject.value(QStringLiteral("usage")).toObject();
+        m_totalInputTokens += usage.value(QStringLiteral("input_tokens")).toInteger();
+        m_totalCachedTokens += usage.value(QStringLiteral("input_tokens_details")).toObject().value(QStringLiteral("cached_tokens")).toInteger();
+        m_totalOutputTokens += usage.value(QStringLiteral("output_tokens")).toInteger();
         writeBytes(QDir(m_outputDir).filePath(QStringLiteral("debug/openai_response_attempt_%1.json").arg(m_aiAttempt)), data);
         writeBytes(QDir(m_outputDir).filePath(QStringLiteral("debug/openai_response.json")), data);
         if (!ok) {
@@ -384,7 +395,7 @@ void ListifyApp::callOpenAi(const QString &correction)
     });
 }
 
-bool ListifyApp::saveResults(const QByteArray &, const SeoResult &result)
+bool ListifyApp::saveResults(const QByteArray &rawResponse, const SeoResult &result)
 {
     const QString resultDir = QDir(m_outputDir).filePath(QStringLiteral("result")); QString error;
     const QString tags = result.tags.join(QStringLiteral(", "));
@@ -400,6 +411,24 @@ bool ListifyApp::saveResults(const QByteArray &, const SeoResult &result)
     const QString markdown = QStringLiteral("# %1\n\n## Description\n\n%2\n\n## Tags\n\n%3\n\n## Image filename\n\n`%4`\n\n## Alt text\n\n%5\n")
         .arg(result.title, result.description, tags, result.imageFilename, result.altText);
     writeText(QDir(resultDir).filePath(QStringLiteral("listing.md")), markdown);
+    const auto responseObject = QJsonDocument::fromJson(rawResponse).object();
+    double inputRate = 0.0, cachedRate = 0.0, outputRate = 0.0;
+    if (m_usedModel.startsWith(QStringLiteral("gpt-6.2-astra"))) { inputRate = 8.0; cachedRate = 0.4; outputRate = 40.0; }
+    else if (m_usedModel.startsWith(QStringLiteral("gpt-6.2-sol"))) { inputRate = 2.0; cachedRate = 0.1; outputRate = 10.0; }
+    else if (m_usedModel.startsWith(QStringLiteral("gpt-5.5"))) { inputRate = 5.0; cachedRate = 0.5; outputRate = 30.0; }
+    const qint64 uncachedTokens = qMax<qint64>(0, m_totalInputTokens - m_totalCachedTokens);
+    const double estimatedCost = (uncachedTokens * inputRate + m_totalCachedTokens * cachedRate +
+                                  m_totalOutputTokens * outputRate) / 1000000.0;
+    QJsonObject generation{{QStringLiteral("model"), m_usedModel},
+        {QStringLiteral("reasoning_effort"), m_reasoningEffort},
+        {QStringLiteral("attempts"), m_aiAttempt},
+        {QStringLiteral("response_id"), responseObject.value(QStringLiteral("id"))},
+        {QStringLiteral("input_tokens_total"), m_totalInputTokens},
+        {QStringLiteral("cached_input_tokens_total"), m_totalCachedTokens},
+        {QStringLiteral("output_tokens_total"), m_totalOutputTokens}};
+    if (inputRate > 0.0) generation.insert(QStringLiteral("estimated_standard_cost_usd"), estimatedCost);
+    writeBytes(QDir(resultDir).filePath(QStringLiteral("generation_info.json")),
+               QJsonDocument(generation).toJson(QJsonDocument::Indented));
     const QString ps = QStringLiteral(
         "$root = Join-Path $PSScriptRoot 'result'\n"
         "$items = @('title.txt','description.txt','tags.txt','alt_text.txt','image_filename.txt')\n"
@@ -423,7 +452,8 @@ void ListifyApp::loadEnvironment()
                             QStringLiteral("C:/Users/faniz/Documents/Kindle_Case/Mockify/.env")};
     const QSet<QString> allowed{QStringLiteral("ETSY_API_KEY"), QStringLiteral("ETSY_SECRET"),
         QStringLiteral("PROXY_HOST"), QStringLiteral("PROXY_PORT"), QStringLiteral("PROXY_USERNAME"),
-        QStringLiteral("PROXY_PASSWORD"), QStringLiteral("OPENAI_API_KEY"), QStringLiteral("OPENAI_SEO_MODEL")};
+        QStringLiteral("PROXY_PASSWORD"), QStringLiteral("OPENAI_API_KEY"), QStringLiteral("OPENAI_SEO_MODEL"),
+        QStringLiteral("OPENAI_REASONING_EFFORT")};
     for (const auto &path : paths) {
         QFile file(path); if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
         QTextStream stream(&file);
@@ -455,7 +485,8 @@ void ListifyApp::loadProfile()
     auto resolve = [profileDir](const QString &value) { return QFileInfo(value).isAbsolute() ? value : QDir(profileDir).filePath(value); };
     QString promptPath = resolve(manifest.value(QStringLiteral("seo_prompt")).toString(QStringLiteral("seo_generator.txt")));
     QString keywordsPath = resolve(manifest.value(QStringLiteral("keywords")).toString(QStringLiteral("keyword.txt")));
-    m_prompt = readText(promptPath); m_keywords = readText(keywordsPath);
+    QString stylePath = resolve(manifest.value(QStringLiteral("style_rules")).toString(QStringLiteral("listing_style.txt")));
+    m_prompt = readText(promptPath); m_keywords = readText(keywordsPath); m_styleRules = readText(stylePath);
 }
 
 void ListifyApp::loadJob(const QString &path)

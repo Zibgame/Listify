@@ -41,6 +41,9 @@ void ListifyTests::validatesSeoContract()
     QVERIFY(validateSeoResult(valid));
     valid.tags.removeLast();
     QVERIFY(!validateSeoResult(valid));
+    valid.tags << QStringLiteral("tag12");
+    valid.description = QStringLiteral("mot ").repeated(500) + QStringLiteral(" SECTION 3 ");
+    QVERIFY(!validateSeoResult(valid));
 }
 
 void ListifyTests::parsesStructuredResponse()

@@ -68,6 +68,10 @@ bool validateSeoResult(const SeoResult &result, QString *error)
     const int wordCount = result.description.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts).size();
     if (wordCount < 500)
         return fail(QStringLiteral("La description doit contenir au moins 500 mots."));
+    const QRegularExpression leakedSection(QStringLiteral("\\bSECTION\\s*[1-5]\\b"),
+                                             QRegularExpression::CaseInsensitiveOption);
+    if (result.description.contains(leakedSection))
+        return fail(QStringLiteral("La description révèle des libellés internes SECTION 1–5."));
     if (result.tags.size() != 13)
         return fail(QStringLiteral("La sortie doit contenir exactement 13 tags."));
     for (const auto &tag : result.tags)

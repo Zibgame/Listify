@@ -1,5 +1,6 @@
 {
   "name": "Kindle / Kobo cases",
   "seo_prompt": "seo_generator.txt",
-  "keywords": "keyword.txt"
+  "keywords": "keyword.txt",
+  "style_rules": "listing_style.txt"
 }
