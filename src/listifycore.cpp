@@ -52,13 +52,27 @@ bool parseSeoResponse(const QByteArray &responseData, SeoResult *result, QString
     SeoResult parsed;
     parsed.title = object.value(QStringLiteral("title")).toString().trimmed();
     parsed.description = object.value(QStringLiteral("description")).toString().trimmed();
-    parsed.imageFilename = object.value(QStringLiteral("image_filename")).toString().trimmed();
+    parsed.imageFilename = normalizeImageFilename(object.value(QStringLiteral("image_filename")).toString());
     parsed.altText = object.value(QStringLiteral("alt_text")).toString().trimmed();
     for (const auto &tag : object.value(QStringLiteral("tags")).toArray())
         parsed.tags << tag.toString().trimmed();
     if (!validateSeoResult(parsed, error)) return false;
     if (result) *result = parsed;
     return true;
+}
+
+QString normalizeImageFilename(const QString &filename)
+{
+    QString normalized = filename.trimmed().toLower();
+    normalized.remove(QRegularExpression(QStringLiteral("\\.(?:png|jpe?g|webp|gif)$"),
+                                         QRegularExpression::CaseInsensitiveOption));
+    normalized.replace(QRegularExpression(QStringLiteral("[^a-z0-9]+")), QStringLiteral("-"));
+    normalized.remove(QRegularExpression(QStringLiteral("^-+|-+$")));
+    QStringList words = normalized.split(QLatin1Char('-'), Qt::SkipEmptyParts);
+    if (words.size() > 4) words = words.mid(0, 4);
+    if (words.size() < 2) words << QStringLiteral("kindle");
+    if (words.size() < 2) words << QStringLiteral("case");
+    return words.join(QLatin1Char('-'));
 }
 
 bool validateSeoResult(const SeoResult &result, QString *error)
@@ -88,9 +102,14 @@ bool validateSeoResult(const SeoResult &result, QString *error)
         return fail(QStringLiteral("Le nom d'image doit contenir 2 à 4 mots minuscules séparés par des tirets."));
     if (result.altText.size() < 450 || result.altText.size() > 500)
         return fail(QStringLiteral("Le texte alternatif doit contenir entre 450 et 500 caractères."));
-    const QString leadKeyword = result.title.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts)
-                                    .mid(0, 3).join(QLatin1Char(' '));
-    if (!result.altText.startsWith(leadKeyword, Qt::CaseInsensitive))
+    auto normalizedWords = [](QString text) {
+        text = text.toCaseFolded();
+        text.replace(QRegularExpression(QStringLiteral("[^a-z0-9]+")), QStringLiteral(" "));
+        return text.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    };
+    const QStringList titleLead = normalizedWords(result.title).mid(0, 3);
+    const QStringList altLead = normalizedWords(result.altText).mid(0, 3);
+    if (titleLead.size() < 3 || altLead != titleLead)
         return fail(QStringLiteral("Le texte alternatif doit commencer par les trois premiers mots-clés du titre."));
     return true;
 }
