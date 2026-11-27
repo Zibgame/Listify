@@ -55,7 +55,17 @@ bool writeText(const QString &path, const QString &text, QString *error = nullpt
 QString readText(const QString &path)
 {
     QFile file(path);
-    return file.open(QIODevice::ReadOnly | QIODevice::Text) ? QString::fromUtf8(file.readAll()) : QString();
+    return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+}
+
+QString decodeBasicHtmlEntities(QString text)
+{
+    return text.replace(QStringLiteral("&quot;"), QStringLiteral("\""))
+               .replace(QStringLiteral("&#39;"), QStringLiteral("'"))
+               .replace(QStringLiteral("&apos;"), QStringLiteral("'"))
+               .replace(QStringLiteral("&lt;"), QStringLiteral("<"))
+               .replace(QStringLiteral("&gt;"), QStringLiteral(">"))
+               .replace(QStringLiteral("&amp;"), QStringLiteral("&"));
 }
 
 bool openPath(const QString &path)
@@ -204,7 +214,7 @@ void ListifyApp::startWorkflow()
     if (apiKey().isEmpty()) { m_error = QStringLiteral("Clé Etsy absente du .env."); refresh(); return; }
     if (qEnvironmentVariable("OPENAI_API_KEY").trimmed().isEmpty()) { m_error = QStringLiteral("OPENAI_API_KEY absente."); refresh(); return; }
     if (m_prompt.trimmed().isEmpty()) { m_error = QStringLiteral("Prompt SEO du profil introuvable."); refresh(); return; }
-    m_busy = true; m_error.clear(); m_result = {}; m_images.clear(); m_imageUrls.clear(); m_listing = {};
+    m_busy = true; m_error.clear(); m_result = {}; m_images.clear(); m_imageUrls.clear(); m_listing = {}; m_inventory = {};
     m_outputDir.clear(); m_shopName.clear(); m_downloadIndex = 0; m_aiAttempt = 0;
     m_totalInputTokens = 0; m_totalCachedTokens = 0; m_totalOutputTokens = 0;
     m_status = QStringLiteral("Récupération de la fiche Etsy %1...").arg(m_listingId); refresh();
@@ -236,7 +246,25 @@ void ListifyApp::fetchShop(qint64 shopId)
         m_shopName = QJsonDocument::fromJson(data).object().value(QStringLiteral("shop_name")).toString().trimmed();
         if (m_shopName.isEmpty()) { fail(QStringLiteral("Etsy shop"), QStringLiteral("Nom de boutique inconnu.")); return; }
         if (isExcludedShop(m_shopName)) { fail(QStringLiteral("Etsy shop"), QStringLiteral("TheKindleNook est systématiquement exclue.")); return; }
-        m_status = QStringLiteral("Boutique %1 vérifiée. Lecture des images...").arg(m_shopName); refresh(); fetchImageIndex();
+        m_status = QStringLiteral("Boutique %1 vérifiée. Lecture des variantes réelles...").arg(m_shopName); refresh(); fetchInventory();
+    });
+}
+
+void ListifyApp::fetchInventory()
+{
+    const QUrl url(QStringLiteral("https://openapi.etsy.com/v3/application/listings/%1/inventory").arg(m_listingId));
+    QNetworkReply *reply = m_network.get(etsyRequest(url));
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        const QByteArray data = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool ok = reply->error() == QNetworkReply::NoError && status >= 200 && status < 300;
+        reply->deleteLater();
+        if (ok) m_inventory = QJsonDocument::fromJson(data).object();
+        else m_inventory = QJsonObject{{QStringLiteral("unavailable"), true},
+                                       {QStringLiteral("http_status"), status}};
+        m_status = ok ? QStringLiteral("Variantes Etsy récupérées. Lecture des images...")
+                      : QStringLiteral("Variantes indisponibles. Lecture des images...");
+        refresh(); fetchImageIndex();
     });
 }
 
@@ -295,6 +323,8 @@ bool ListifyApp::prepareOutput()
     archive.insert(QStringLiteral("collected_at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
     QString error;
     if (!writeBytes(QDir(m_outputDir).filePath(QStringLiteral("source/listing.json")), QJsonDocument(archive).toJson(QJsonDocument::Indented), &error)) { fail(QStringLiteral("Output"), error); return false; }
+    writeBytes(QDir(m_outputDir).filePath(QStringLiteral("source/inventory.json")),
+               QJsonDocument(m_inventory).toJson(QJsonDocument::Indented));
     QJsonArray imageManifest;
     for (int i = 0; i < m_images.size(); ++i) {
         const auto &image = m_images.at(i);
@@ -307,6 +337,7 @@ bool ListifyApp::prepareOutput()
     if (!artwork.open(QIODevice::ReadOnly) || !writeBytes(QDir(m_outputDir).filePath(QStringLiteral("source/productfy_artwork.png")), artwork.readAll(), &error)) { fail(QStringLiteral("Output"), error); return false; }
     writeText(QDir(m_outputDir).filePath(QStringLiteral("input/seo_prompt.txt")), m_prompt);
     writeText(QDir(m_outputDir).filePath(QStringLiteral("input/listing_style.txt")), m_styleRules);
+    writeText(QDir(m_outputDir).filePath(QStringLiteral("input/product_brief.txt")), productBrief());
     if (m_useKeywords) writeText(QDir(m_outputDir).filePath(QStringLiteral("input/keywords.txt")), m_keywords);
     return true;
 }
@@ -317,19 +348,22 @@ void ListifyApp::callOpenAi(const QString &correction)
     QFile artwork(QDir(m_outputDir).filePath(QStringLiteral("source/productfy_artwork.png")));
     artwork.open(QIODevice::ReadOnly);
     QJsonArray content;
-    QJsonObject context = m_listing;
-    context.insert(QStringLiteral("resolved_shop_name"), m_shopName);
-    context.insert(QStringLiteral("listing_url"), QString::fromUtf8(m_urlInput));
-    QString payload = QStringLiteral("DONNÉES DU LISTING ETSY :\n%1\n\n").arg(QString::fromUtf8(QJsonDocument(context).toJson(QJsonDocument::Indented)));
-    if (m_useKeywords && !m_keywords.trimmed().isEmpty()) payload += QStringLiteral("FICHIER DE MOTS-CLÉS DE LA NICHE :\n") + m_keywords;
-    payload += QStringLiteral("\n\nLa première image est l'artwork final Productfy. Les suivantes sont les premières images du listing source. Utilise toutes les données réellement observables. Retourne uniquement l'objet JSON imposé.");
+    QString payload = productBrief();
+    if (m_useKeywords && !m_keywords.trimmed().isEmpty())
+        payload += QStringLiteral("\n\n=== KEYWORD TXT FILE ===\n") + m_keywords;
+    payload += QStringLiteral("\n\nGenerate the five requested outputs now. Treat the new Productfy artwork as the product design to describe. Use the competitor listing only for verified physical features, compatibility and variants. Return only the imposed JSON object.");
     if (!correction.isEmpty())
         payload += QStringLiteral("\n\nCORRECTION OBLIGATOIRE APRÈS VALIDATION : %1 Recrée intégralement les cinq champs en respectant toutes les limites.").arg(correction);
     content.append(QJsonObject{{QStringLiteral("type"), QStringLiteral("input_text")}, {QStringLiteral("text"), payload}});
+    content.append(QJsonObject{{QStringLiteral("type"), QStringLiteral("input_text")},
+                               {QStringLiteral("text"), QStringLiteral("IMAGE A — NEW PRODUCTFY ARTWORK. This is the new design being listed and the main source for visual theme, colors and motifs.")}});
     content.append(QJsonObject{{QStringLiteral("type"), QStringLiteral("input_image")},
                                {QStringLiteral("image_url"), QStringLiteral("data:image/png;base64,") + QString::fromLatin1(artwork.readAll().toBase64())},
                                {QStringLiteral("detail"), QStringLiteral("high")}});
-    for (const auto &image : m_images) {
+    for (int i = 0; i < m_images.size(); ++i) {
+        const auto &image = m_images.at(i);
+        content.append(QJsonObject{{QStringLiteral("type"), QStringLiteral("input_text")},
+                                   {QStringLiteral("text"), QStringLiteral("COMPETITOR LISTING IMAGE %1 — use only as supporting evidence for the physical case, presentation and available features. Do not let it override the new artwork.").arg(i + 1)}});
         const QString mime = image.extension == QStringLiteral("png") ? QStringLiteral("image/png") :
                              image.extension == QStringLiteral("webp") ? QStringLiteral("image/webp") : QStringLiteral("image/jpeg");
         content.append(QJsonObject{{QStringLiteral("type"), QStringLiteral("input_image")},
@@ -339,7 +373,7 @@ void ListifyApp::callOpenAi(const QString &correction)
     const QJsonObject schema{{QStringLiteral("type"), QStringLiteral("object")},
         {QStringLiteral("properties"), QJsonObject{
             {QStringLiteral("title"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")},
-                {QStringLiteral("minLength"), 105}, {QStringLiteral("maxLength"), 130}}},
+                {QStringLiteral("minLength"), 105}, {QStringLiteral("maxLength"), 125}}},
             {QStringLiteral("description"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
             {QStringLiteral("tags"), QJsonObject{{QStringLiteral("type"), QStringLiteral("array")},
                 {QStringLiteral("minItems"), 13}, {QStringLiteral("maxItems"), 13},
@@ -411,6 +445,9 @@ bool ListifyApp::saveResults(const QByteArray &rawResponse, const SeoResult &res
     const QString markdown = QStringLiteral("# %1\n\n## Description\n\n%2\n\n## Tags\n\n%3\n\n## Image filename\n\n`%4`\n\n## Alt text\n\n%5\n")
         .arg(result.title, result.description, tags, result.imageFilename, result.altText);
     writeText(QDir(resultDir).filePath(QStringLiteral("listing.md")), markdown);
+    const QString chatGptOutput = QStringLiteral("TITLE\n%1\n\nDESCRIPTION\n%2\n\nTAGS\n%3\n\nIMAGE FILENAME\n%4\n\nALT TEXT\n%5\n")
+        .arg(result.title, result.description, tags, result.imageFilename, result.altText);
+    writeText(QDir(resultDir).filePath(QStringLiteral("chatgpt_output.txt")), chatGptOutput);
     const auto responseObject = QJsonDocument::fromJson(rawResponse).object();
     double inputRate = 0.0, cachedRate = 0.0, outputRate = 0.0;
     if (m_usedModel.startsWith(QStringLiteral("gpt-6.2-astra"))) { inputRate = 8.0; cachedRate = 0.4; outputRate = 40.0; }
@@ -452,8 +489,10 @@ void ListifyApp::loadEnvironment()
                             QStringLiteral("C:/Users/faniz/Documents/Kindle_Case/Mockify/.env")};
     const QSet<QString> allowed{QStringLiteral("ETSY_API_KEY"), QStringLiteral("ETSY_SECRET"),
         QStringLiteral("PROXY_HOST"), QStringLiteral("PROXY_PORT"), QStringLiteral("PROXY_USERNAME"),
-        QStringLiteral("PROXY_PASSWORD"), QStringLiteral("OPENAI_API_KEY"), QStringLiteral("OPENAI_SEO_MODEL"),
-        QStringLiteral("OPENAI_REASONING_EFFORT")};
+        QStringLiteral("PROXY_PASSWORD"), QStringLiteral("ETSY_ACCESS_TOKEN"),
+        QStringLiteral("OPENAI_API_KEY"), QStringLiteral("OPENAI_SEO_MODEL"),
+        QStringLiteral("OPENAI_REASONING_EFFORT"), QStringLiteral("LISTIFY_SEO_PROMPT"),
+        QStringLiteral("LISTIFY_KEYWORDS")};
     for (const auto &path : paths) {
         QFile file(path); if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
         QTextStream stream(&file);
@@ -486,7 +525,52 @@ void ListifyApp::loadProfile()
     QString promptPath = resolve(manifest.value(QStringLiteral("seo_prompt")).toString(QStringLiteral("seo_generator.txt")));
     QString keywordsPath = resolve(manifest.value(QStringLiteral("keywords")).toString(QStringLiteral("keyword.txt")));
     QString stylePath = resolve(manifest.value(QStringLiteral("style_rules")).toString(QStringLiteral("listing_style.txt")));
+    const QString externalPrompt = qEnvironmentVariable("LISTIFY_SEO_PROMPT",
+        QStringLiteral("C:/Users/faniz/Documents/Kindle_Case/seo_generator.txt"));
+    const QString externalKeywords = qEnvironmentVariable("LISTIFY_KEYWORDS",
+        QStringLiteral("C:/Users/faniz/Documents/Kindle_Case/keyword.txt"));
+    if (m_profileName == QStringLiteral("kindle_case") && QFileInfo(externalPrompt).isFile()) promptPath = externalPrompt;
+    if (m_profileName == QStringLiteral("kindle_case") && QFileInfo(externalKeywords).isFile()) keywordsPath = externalKeywords;
     m_prompt = readText(promptPath); m_keywords = readText(keywordsPath); m_styleRules = readText(stylePath);
+}
+
+QString ListifyApp::productBrief() const
+{
+    const auto stringList = [](const QJsonValue &value) {
+        QStringList values;
+        for (const auto &item : value.toArray()) values << item.toString();
+        return values.join(QStringLiteral(", "));
+    };
+    QStringList variants;
+    QSet<QString> seenVariants;
+    for (const auto &productValue : m_inventory.value(QStringLiteral("products")).toArray()) {
+        QStringList values;
+        for (const auto &propertyValue : productValue.toObject().value(QStringLiteral("property_values")).toArray()) {
+            const auto property = propertyValue.toObject();
+            const QString name = property.value(QStringLiteral("property_name")).toString();
+            const QString options = stringList(property.value(QStringLiteral("values")));
+            if (!name.isEmpty() && !options.isEmpty()) values << name + QStringLiteral(": ") + options;
+        }
+        const QString variant = values.join(QStringLiteral(" | "));
+        if (!variant.isEmpty() && !seenVariants.contains(variant)) { seenVariants.insert(variant); variants << variant; }
+    }
+    QString brief = QStringLiteral(
+        "=== PRODUCT INPUTS ===\n"
+        "Product name / competitor title:\n%1\n\n"
+        "Supplier / competitor description (raw context only; outperform it):\n%2\n\n"
+        "Verified shop: %3\n"
+        "Listing URL: %4\n"
+        "Existing competitor tags: %5\n"
+        "Materials returned by Etsy: %6\n\n"
+        "Verified Device / Style variant catalog:\n%7")
+        .arg(m_listing.value(QStringLiteral("title")).toString(),
+             decodeBasicHtmlEntities(m_listing.value(QStringLiteral("description")).toString()),
+             m_shopName, QString::fromUtf8(m_urlInput),
+             stringList(m_listing.value(QStringLiteral("tags"))),
+             stringList(m_listing.value(QStringLiteral("materials"))),
+             variants.isEmpty() ? QStringLiteral("Not available from Etsy; do not invent variants.")
+                                : variants.join(QLatin1Char('\n')));
+    return brief;
 }
 
 void ListifyApp::loadJob(const QString &path)
@@ -519,6 +603,8 @@ QString ListifyApp::apiKey() const
 QNetworkRequest ListifyApp::etsyRequest(const QUrl &url) const
 {
     QNetworkRequest request(url); request.setRawHeader("x-api-key", apiKey().toUtf8());
+    const QByteArray accessToken = qEnvironmentVariable("ETSY_ACCESS_TOKEN").trimmed().toUtf8();
+    if (!accessToken.isEmpty()) request.setRawHeader("Authorization", QByteArray("Bearer ") + accessToken);
     request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Listify/2.0")); request.setTransferTimeout(120000); return request;
 }
 

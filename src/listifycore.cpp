@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <QSet>
 #include <QUrl>
 
 QString listingIdFromEtsyUrl(const QString &url)
@@ -63,8 +64,8 @@ bool parseSeoResponse(const QByteArray &responseData, SeoResult *result, QString
 bool validateSeoResult(const SeoResult &result, QString *error)
 {
     auto fail = [error](const QString &message) { if (error) *error = message; return false; };
-    if (result.title.size() < 105 || result.title.size() > 130)
-        return fail(QStringLiteral("Le titre doit contenir entre 105 et 130 caractères."));
+    if (result.title.size() < 105 || result.title.size() > 125)
+        return fail(QStringLiteral("Le titre doit contenir entre 105 et 125 caractères, cible exacte du prompt."));
     const int wordCount = result.description.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts).size();
     if (wordCount < 500)
         return fail(QStringLiteral("La description doit contenir au moins 500 mots."));
@@ -74,13 +75,23 @@ bool validateSeoResult(const SeoResult &result, QString *error)
         return fail(QStringLiteral("La description révèle des libellés internes SECTION 1–5."));
     if (result.tags.size() != 13)
         return fail(QStringLiteral("La sortie doit contenir exactement 13 tags."));
-    for (const auto &tag : result.tags)
+    QSet<QString> uniqueTags;
+    for (const auto &tag : result.tags) {
         if (tag.isEmpty() || tag.size() > 20)
             return fail(QStringLiteral("Chaque tag doit contenir de 1 à 20 caractères."));
-    if (result.imageFilename.isEmpty())
-        return fail(QStringLiteral("Le nom d'image est absent."));
+        uniqueTags.insert(tag.toCaseFolded());
+    }
+    if (uniqueTags.size() != 13)
+        return fail(QStringLiteral("Les 13 tags doivent être différents."));
+    const QRegularExpression filenamePattern(QStringLiteral("^[a-z0-9]+(?:-[a-z0-9]+){1,3}$"));
+    if (!filenamePattern.match(result.imageFilename).hasMatch())
+        return fail(QStringLiteral("Le nom d'image doit contenir 2 à 4 mots minuscules séparés par des tirets."));
     if (result.altText.size() < 450 || result.altText.size() > 500)
         return fail(QStringLiteral("Le texte alternatif doit contenir entre 450 et 500 caractères."));
+    const QString leadKeyword = result.title.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts)
+                                    .mid(0, 3).join(QLatin1Char(' '));
+    if (!result.altText.startsWith(leadKeyword, Qt::CaseInsensitive))
+        return fail(QStringLiteral("Le texte alternatif doit commencer par les trois premiers mots-clés du titre."));
     return true;
 }
 

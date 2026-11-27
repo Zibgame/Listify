@@ -6,7 +6,7 @@ Application Windows C++17 / Qt 6 / FTXUI qui transforme un lien Etsy et un artwo
 
 1. Reçoit manuellement un lien Etsy et un PNG, ou automatiquement un job créé par Productfy.
 2. Extrait l'identifiant stable depuis `/listing/<id>`.
-3. Interroge exclusivement Etsy Open API v3 via le proxy obligatoire pour récupérer la fiche et vérifier la boutique.
+3. Interroge exclusivement Etsy Open API v3 via le proxy obligatoire pour récupérer la fiche et vérifier la boutique. Listify tente aussi de lire le catalogue réel de variantes Device/Style ; Etsy exige un jeton OAuth pour cet endpoint et le brief indique clairement « indisponible » si ce jeton manque.
 4. Télécharge, toujours via le proxy, les trois premières images classées par Etsy. Si la fiche en contient une ou deux, Listify utilise seulement celles disponibles.
 5. Archive les données et images sources avant l'appel IA.
 6. Envoie à OpenAI l'artwork Productfy, les images Etsy, les données de la fiche, le prompt du profil et les keywords facultatifs.
@@ -34,6 +34,7 @@ profiles/
 output/<listing_id>/
   source/
     listing.json
+    inventory.json
     images.json
     listing_01.jpg
     listing_02.jpg
@@ -43,6 +44,7 @@ output/<listing_id>/
     seo_prompt.txt
     keywords.txt
     listing_style.txt
+    product_brief.txt
   result/
     name.txt
     title.txt
@@ -52,6 +54,7 @@ output/<listing_id>/
     image_filename.txt
     listing.json
     listing.md
+    chatgpt_output.txt
   debug/
     openai_response.json
   copy_results.cmd
@@ -65,10 +68,14 @@ Double-cliquez sur `copy_results.cmd` pour ouvrir un menu terminal permettant de
 Variables lues depuis `.env`, le projet voisin `Orderify`, puis le `.env` de Mockify :
 
 - `ETSY_API_KEY` et éventuellement `ETSY_SECRET`
+- `ETSY_ACCESS_TOKEN` facultatif pour les variantes protégées par OAuth
 - `PROXY_HOST`, `PROXY_PORT`, `PROXY_USERNAME`, `PROXY_PASSWORD`
 - `OPENAI_API_KEY`
 - `OPENAI_SEO_MODEL` facultatif, valeur par défaut `gpt-6.2-astra`
 - `OPENAI_REASONING_EFFORT` facultatif, valeur par défaut `high`
+- `LISTIFY_SEO_PROMPT` et `LISTIFY_KEYWORDS` facultatifs pour remplacer les fichiers du profil
+
+Pour le profil Kindle, Listify préfère automatiquement les fichiers originaux de `C:\Users\faniz\Documents\Kindle_Case` lorsqu'ils existent, et utilise les copies embarquées comme solution de repli. Les images sont légendées séparément dans le message envoyé au modèle et les données Etsy sont transformées en brief lisible, comme lors d'un envoi manuel dans ChatGPT.
 
 Le fichier `result/generation_info.json` indique le modèle, l'effort, le nombre de tentatives, les tokens réellement consommés et une estimation du coût texte standard pour les modèles connus.
 

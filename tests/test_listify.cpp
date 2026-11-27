@@ -33,27 +33,30 @@ void ListifyTests::excludesOwnShop()
 void ListifyTests::validatesSeoContract()
 {
     SeoResult valid;
-    valid.title = QString(110, QLatin1Char('t'));
+    valid.title = QStringLiteral("Magnetic Kindle Case ") + QString(90, QLatin1Char('x'));
     valid.description = QStringLiteral("mot ").repeated(500);
     for (int i = 0; i < 13; ++i) valid.tags << QStringLiteral("tag%1").arg(i);
     valid.imageFilename = QStringLiteral("kindle-case-floral");
-    valid.altText = QString(475, QLatin1Char('a'));
+    valid.altText = QStringLiteral("Magnetic Kindle Case ") + QString(455, QLatin1Char('a'));
     QVERIFY(validateSeoResult(valid));
     valid.tags.removeLast();
     QVERIFY(!validateSeoResult(valid));
     valid.tags << QStringLiteral("tag12");
     valid.description = QStringLiteral("mot ").repeated(500) + QStringLiteral(" SECTION 3 ");
     QVERIFY(!validateSeoResult(valid));
+    valid.description = QStringLiteral("mot ").repeated(500);
+    valid.imageFilename = QStringLiteral("Too_Many_Invalid Words Here Now");
+    QVERIFY(!validateSeoResult(valid));
 }
 
 void ListifyTests::parsesStructuredResponse()
 {
     QJsonArray tags; for (int i = 0; i < 13; ++i) tags.append(QStringLiteral("tag%1").arg(i));
-    const QJsonObject seo{{QStringLiteral("title"), QString(110, QLatin1Char('t'))},
+    const QJsonObject seo{{QStringLiteral("title"), QStringLiteral("Magnetic Kindle Case ") + QString(90, QLatin1Char('x'))},
                           {QStringLiteral("description"), QStringLiteral("mot ").repeated(500)},
                           {QStringLiteral("tags"), tags},
                           {QStringLiteral("image_filename"), QStringLiteral("kindle-case")},
-                          {QStringLiteral("alt_text"), QString(475, QLatin1Char('a'))}};
+                          {QStringLiteral("alt_text"), QStringLiteral("Magnetic Kindle Case ") + QString(455, QLatin1Char('a'))}};
     const QJsonObject response{{QStringLiteral("output"), QJsonArray{QJsonObject{
         {QStringLiteral("type"), QStringLiteral("message")},
         {QStringLiteral("content"), QJsonArray{QJsonObject{

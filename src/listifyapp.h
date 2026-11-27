@@ -25,6 +25,7 @@ private:
     void startWorkflow();
     void fetchListing();
     void fetchShop(qint64 shopId);
+    void fetchInventory();
     void fetchImageIndex();
     void downloadNextImage();
     void callOpenAi(const QString &correction = QString());
@@ -34,6 +35,7 @@ private:
     void refresh();
     QString projectRoot() const;
     QString apiKey() const;
+    QString productBrief() const;
     QNetworkRequest etsyRequest(const QUrl &url) const;
     void fail(const QString &stage, const QString &message);
 
@@ -53,6 +55,7 @@ private:
     QString m_outputDir;
     QString m_shopName;
     QJsonObject m_listing;
+    QJsonObject m_inventory;
     QVector<QUrl> m_imageUrls;
     QVector<DownloadedImage> m_images;
     int m_downloadIndex = 0;
