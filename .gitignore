@@ -1,0 +1,14 @@
+.env
+build/
+dist/
+.qt/
+output/
+*.user
+*.log
+__pycache__/
+
+# Prototype Python conservé localement, remplacé par l'application C++.
+main.py
+requirements.txt
+cleaner.txt
+shop/

@@ -1,2 +1,98 @@
-# Listify
-AI-powered Etsy listing generator for SEO titles, descriptions, tags, and scalable automation.
+# Listify 2
+
+Application Windows C++17 / Qt 6 / FTXUI qui transforme un lien Etsy et un artwork Productfy en dossier de listing SEO complet.
+
+## Pipeline
+
+1. Reçoit manuellement un lien Etsy et un PNG, ou automatiquement un job créé par Productfy.
+2. Extrait l'identifiant stable depuis `/listing/<id>`.
+3. Interroge exclusivement Etsy Open API v3 via le proxy obligatoire pour récupérer la fiche et vérifier la boutique.
+4. Télécharge, toujours via le proxy, les trois premières images classées par Etsy. Si la fiche en contient une ou deux, Listify utilise seulement celles disponibles.
+5. Archive les données et images sources avant l'appel IA.
+6. Envoie à OpenAI l'artwork Productfy, les images Etsy, les données de la fiche, le prompt du profil et les keywords facultatifs.
+7. Valide strictement la sortie (titre 105–130 caractères, description d'au moins 500 mots, 13 tags, alt text 450–500 caractères). Une seconde tentative corrective est automatique si le premier résultat ne respecte pas le contrat.
+8. Écrit les résultats dans `output/<listing_id>/`.
+
+## Profils de niche
+
+Chaque niche est un dossier sous `profiles/` :
+
+```text
+profiles/
+  kindle_case/
+    profile.json
+    seo_generator.txt
+    keyword.txt
+```
+
+`keyword.txt` est facultatif dans le workflow. Le profil Kindle fourni est une copie des fichiers de `C:\Users\faniz\Documents\Kindle_Case` au moment de la compilation.
+
+## Organisation d'un output
+
+```text
+output/<listing_id>/
+  source/
+    listing.json
+    images.json
+    listing_01.jpg
+    listing_02.jpg
+    listing_03.jpg
+    productfy_artwork.png
+  input/
+    seo_prompt.txt
+    keywords.txt
+  result/
+    name.txt
+    title.txt
+    description.txt
+    tags.txt
+    alt_text.txt
+    image_filename.txt
+    listing.json
+    listing.md
+  debug/
+    openai_response.json
+  copy_results.cmd
+  copy_results.ps1
+```
+
+Double-cliquez sur `copy_results.cmd` pour ouvrir un menu terminal permettant de copier chaque champ dans le presse-papiers. Dans le TUI, les touches `1` à `5` copient également les résultats.
+
+## Configuration
+
+Variables lues depuis `.env`, le projet voisin `Orderify`, puis le `.env` de Mockify :
+
+- `ETSY_API_KEY` et éventuellement `ETSY_SECRET`
+- `PROXY_HOST`, `PROXY_PORT`, `PROXY_USERNAME`, `PROXY_PASSWORD`
+- `OPENAI_API_KEY`
+- `OPENAI_SEO_MODEL` facultatif, valeur par défaut `gpt-5.5`
+
+Sans proxy valide, Listify refuse toute connexion réseau directe.
+
+## Compiler et tester sur ce PC
+
+```powershell
+cd C:\Users\faniz\Documents\Projects\Listify
+& D:\Other\MSYS2\clang64\bin\cmake.exe -S . -B build -G Ninja `
+  -DCMAKE_MAKE_PROGRAM=D:/Other/MSYS2/clang64/bin/ninja.exe `
+  -DCMAKE_CXX_COMPILER=C:/Users/faniz/Documents/Projects/Productfy/.qt/Tools/mingw1310_64/bin/g++.exe `
+  -DCMAKE_PREFIX_PATH=C:/Users/faniz/Documents/Projects/Productfy/.qt/6.8.3/mingw_64 `
+  -DCMAKE_BUILD_TYPE=Release
+& D:\Other\MSYS2\clang64\bin\cmake.exe --build build --parallel
+$env:Path = "C:\Users\faniz\Documents\Projects\Productfy\.qt\6.8.3\mingw_64\bin;C:\Users\faniz\Documents\Projects\Productfy\.qt\Tools\mingw1310_64\bin;$env:Path"
+& D:\Other\MSYS2\clang64\bin\ctest.exe --test-dir build --output-on-failure
+```
+
+## Lancer
+
+```powershell
+.\Listify.exe
+```
+
+Ou directement avec des arguments :
+
+```powershell
+.\dist\Listify.exe --url "https://www.etsy.com/listing/123/example" --artwork "C:\chemin\artwork.png"
+```
+
+Le lanceur racine doit rester à côté du dossier `dist`.
