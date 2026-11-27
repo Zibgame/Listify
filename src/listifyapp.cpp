@@ -13,6 +13,7 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QTextStream>
+#include <QTimer>
 #include <QUrlQuery>
 
 #include <ftxui/component/component.hpp>
@@ -117,12 +118,21 @@ bool ListifyApp::initialize(const QStringList &arguments)
     const int artworkIndex = arguments.indexOf(QStringLiteral("--artwork"));
     if (artworkIndex >= 0 && artworkIndex + 1 < arguments.size()) m_artworkInput = arguments.at(artworkIndex + 1).toUtf8().toStdString();
     if (urlIndex >= 0 || artworkIndex >= 0) m_autoStart = true;
+    if (arguments.contains(QStringLiteral("--headless"))) m_headless = true;
     if (!m_proxyConfigured) m_error = QStringLiteral("Proxy obligatoire absent : aucun accès réseau direct ne sera tenté.");
     return true;
 }
 
 int ListifyApp::run()
 {
+    if (m_headless) {
+        QEventLoop loop;
+        m_headlessLoop = &loop;
+        QTimer::singleShot(0, this, [this] { startWorkflow(); });
+        loop.exec();
+        m_headlessLoop = nullptr;
+        return m_headlessExitCode;
+    }
     auto screen = ScreenInteractive::Fullscreen();
     m_screen = &screen;
     auto urlInput = Input(&m_urlInput, "https://www.etsy.com/listing/...");
@@ -205,19 +215,26 @@ int ListifyApp::run()
 
 void ListifyApp::startWorkflow()
 {
-    if (m_busy) { m_error = QStringLiteral("Un traitement est déjà en cours."); refresh(); return; }
-    if (!m_proxyConfigured) { m_error = QStringLiteral("Proxy obligatoire absent. Connexion refusée."); refresh(); return; }
+    auto reject = [this](const QString &message) {
+        m_error = message; refresh();
+        writeJobStatus(QStringLiteral("failed"), message);
+        if (m_headless) finishHeadless(1);
+    };
+    if (m_busy) { reject(QStringLiteral("Un traitement est déjà en cours.")); return; }
+    if (!m_proxyConfigured) { reject(QStringLiteral("Proxy obligatoire absent. Connexion refusée.")); return; }
     const QString url = QString::fromUtf8(m_urlInput);
     m_listingId = listingIdFromEtsyUrl(url);
-    if (m_listingId.isEmpty()) { m_error = QStringLiteral("Lien Etsy invalide : /listing/<id> attendu."); refresh(); return; }
-    if (!QFileInfo::exists(QString::fromUtf8(m_artworkInput))) { m_error = QStringLiteral("Artwork Productfy introuvable."); refresh(); return; }
-    if (apiKey().isEmpty()) { m_error = QStringLiteral("Clé Etsy absente du .env."); refresh(); return; }
-    if (qEnvironmentVariable("OPENAI_API_KEY").trimmed().isEmpty()) { m_error = QStringLiteral("OPENAI_API_KEY absente."); refresh(); return; }
-    if (m_prompt.trimmed().isEmpty()) { m_error = QStringLiteral("Prompt SEO du profil introuvable."); refresh(); return; }
+    if (m_listingId.isEmpty()) { reject(QStringLiteral("Lien Etsy invalide : /listing/<id> attendu.")); return; }
+    if (!QFileInfo::exists(QString::fromUtf8(m_artworkInput))) { reject(QStringLiteral("Artwork Productfy introuvable.")); return; }
+    if (apiKey().isEmpty()) { reject(QStringLiteral("Clé Etsy absente du .env.")); return; }
+    if (qEnvironmentVariable("OPENAI_API_KEY").trimmed().isEmpty()) { reject(QStringLiteral("OPENAI_API_KEY absente.")); return; }
+    if (m_prompt.trimmed().isEmpty()) { reject(QStringLiteral("Prompt SEO du profil introuvable.")); return; }
     m_busy = true; m_error.clear(); m_result = {}; m_images.clear(); m_imageUrls.clear(); m_listing = {}; m_inventory = {};
     m_outputDir.clear(); m_shopName.clear(); m_downloadIndex = 0; m_aiAttempt = 0;
+    m_metadataPending = 0; m_pendingImageDownloads = 0; m_metadataError.clear();
     m_totalInputTokens = 0; m_totalCachedTokens = 0; m_totalOutputTokens = 0;
     m_status = QStringLiteral("Récupération de la fiche Etsy %1...").arg(m_listingId); refresh();
+    writeJobStatus(QStringLiteral("running"), m_status);
     fetchListing();
 }
 
@@ -232,7 +249,12 @@ void ListifyApp::fetchListing()
         m_listing = QJsonDocument::fromJson(data).object();
         const qint64 shopId = m_listing.value(QStringLiteral("shop_id")).toVariant().toLongLong();
         if (shopId <= 0) { fail(QStringLiteral("Etsy listing"), QStringLiteral("Vendeur inconnu.")); return; }
-        m_status = QStringLiteral("Fiche trouvée. Vérification de la boutique..."); refresh(); fetchShop(shopId);
+        m_metadataPending = 3;
+        m_status = QStringLiteral("Fiche trouvée. Boutique, variantes et images analysées en parallèle...");
+        refresh();
+        fetchShop(shopId);
+        fetchInventory();
+        fetchImageIndex();
     });
 }
 
@@ -242,11 +264,11 @@ void ListifyApp::fetchShop(qint64 shopId)
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
         const QByteArray data = reply->readAll(); const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool ok = reply->error() == QNetworkReply::NoError && status >= 200 && status < 300; reply->deleteLater();
-        if (!ok) { fail(QStringLiteral("Etsy shop"), QStringLiteral("HTTP %1").arg(status)); return; }
+        if (!ok) { metadataPartFinished(QStringLiteral("Boutique Etsy HTTP %1").arg(status)); return; }
         m_shopName = QJsonDocument::fromJson(data).object().value(QStringLiteral("shop_name")).toString().trimmed();
-        if (m_shopName.isEmpty()) { fail(QStringLiteral("Etsy shop"), QStringLiteral("Nom de boutique inconnu.")); return; }
-        if (isExcludedShop(m_shopName)) { fail(QStringLiteral("Etsy shop"), QStringLiteral("TheKindleNook est systématiquement exclue.")); return; }
-        m_status = QStringLiteral("Boutique %1 vérifiée. Lecture des variantes réelles...").arg(m_shopName); refresh(); fetchInventory();
+        if (m_shopName.isEmpty()) { metadataPartFinished(QStringLiteral("Nom de boutique inconnu.")); return; }
+        if (isExcludedShop(m_shopName)) { metadataPartFinished(QStringLiteral("TheKindleNook est systématiquement exclue.")); return; }
+        metadataPartFinished();
     });
 }
 
@@ -262,9 +284,7 @@ void ListifyApp::fetchInventory()
         if (ok) m_inventory = QJsonDocument::fromJson(data).object();
         else m_inventory = QJsonObject{{QStringLiteral("unavailable"), true},
                                        {QStringLiteral("http_status"), status}};
-        m_status = ok ? QStringLiteral("Variantes Etsy récupérées. Lecture des images...")
-                      : QStringLiteral("Variantes indisponibles. Lecture des images...");
-        refresh(); fetchImageIndex();
+        metadataPartFinished();
     });
 }
 
@@ -274,7 +294,7 @@ void ListifyApp::fetchImageIndex()
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
         const QByteArray data = reply->readAll(); const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool ok = reply->error() == QNetworkReply::NoError && status >= 200 && status < 300; reply->deleteLater();
-        if (!ok) { fail(QStringLiteral("Images Etsy"), QStringLiteral("HTTP %1").arg(status)); return; }
+        if (!ok) { metadataPartFinished(QStringLiteral("Images Etsy HTTP %1").arg(status)); return; }
         auto results = QJsonDocument::fromJson(data).object().value(QStringLiteral("results")).toArray();
         QVector<QPair<int,QUrl>> ranked;
         for (const auto &value : results) {
@@ -285,33 +305,61 @@ void ListifyApp::fetchImageIndex()
         }
         std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
         for (int i = 0; i < qMin(3, ranked.size()); ++i) m_imageUrls << ranked.at(i).second;
-        if (m_imageUrls.isEmpty()) { fail(QStringLiteral("Images Etsy"), QStringLiteral("Aucune image de listing disponible.")); return; }
-        m_status = QStringLiteral("Téléchargement de %1 image(s) source via le proxy...").arg(m_imageUrls.size()); refresh(); downloadNextImage();
+        if (m_imageUrls.isEmpty()) { metadataPartFinished(QStringLiteral("Aucune image de listing disponible.")); return; }
+        metadataPartFinished();
     });
+}
+
+void ListifyApp::metadataPartFinished(const QString &error)
+{
+    if (!error.isEmpty() && m_metadataError.isEmpty()) m_metadataError = error;
+    if (--m_metadataPending > 0) {
+        m_status = QStringLiteral("Collecte Etsy parallèle : %1/3 source(s) terminée(s)...").arg(3 - m_metadataPending);
+        refresh(); return;
+    }
+    if (!m_metadataError.isEmpty()) { fail(QStringLiteral("Collecte Etsy"), m_metadataError); return; }
+    m_status = QStringLiteral("Métadonnées prêtes. Téléchargement parallèle de %1 image(s)...").arg(m_imageUrls.size());
+    refresh(); downloadNextImage();
 }
 
 void ListifyApp::downloadNextImage()
 {
-    if (m_downloadIndex >= m_imageUrls.size()) {
-        if (!prepareOutput()) return;
-        m_status = QStringLiteral("Sources archivées. Génération SEO avec %1 image(s) Etsy + artwork...").arg(m_images.size()); refresh();
-        callOpenAi(); return;
+    m_downloadIndex = 0;
+    m_pendingImageDownloads = m_imageUrls.size();
+    m_images.resize(m_imageUrls.size());
+    for (int index = 0; index < m_imageUrls.size(); ++index) {
+        const QUrl url = m_imageUrls.at(index);
+        QNetworkRequest request(url);
+        request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Listify/2.0"));
+        request.setTransferTimeout(120000);
+        QNetworkReply *reply = m_network.get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, url, index] {
+            const QByteArray data = reply->readAll();
+            const QString message = reply->errorString();
+            const QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+            const bool ok = reply->error() == QNetworkReply::NoError && !data.isEmpty();
+            reply->deleteLater();
+            if (!m_busy) return;
+            if (!ok) { fail(QStringLiteral("Image Etsy"), message); return; }
+            m_images[index] = {data, safeImageExtension(contentType, url.toString()), url.toString()};
+            ++m_downloadIndex;
+            --m_pendingImageDownloads;
+            m_status = QStringLiteral("Images téléchargées en parallèle : %1/%2").arg(m_downloadIndex).arg(m_imageUrls.size());
+            refresh();
+            if (m_pendingImageDownloads == 0) {
+                if (!prepareOutput()) return;
+                m_status = QStringLiteral("Sources archivées. Génération SEO avec %1 image(s) Etsy + artwork...").arg(m_images.size());
+                refresh(); callOpenAi();
+            }
+        });
     }
-    const QUrl url = m_imageUrls.at(m_downloadIndex);
-    QNetworkRequest request(url); request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Listify/2.0")); request.setTransferTimeout(120000);
-    QNetworkReply *reply = m_network.get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, url] {
-        const QByteArray data = reply->readAll();
-        if (reply->error() != QNetworkReply::NoError || data.isEmpty()) { const QString message = reply->errorString(); reply->deleteLater(); fail(QStringLiteral("Image Etsy"), message); return; }
-        const QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString(); reply->deleteLater();
-        m_images.push_back({data, safeImageExtension(contentType, url.toString()), url.toString()});
-        ++m_downloadIndex; m_status = QStringLiteral("Images téléchargées : %1/%2").arg(m_downloadIndex).arg(m_imageUrls.size()); refresh(); downloadNextImage();
-    });
 }
 
 bool ListifyApp::prepareOutput()
 {
-    m_outputDir = QDir(projectRoot()).filePath(QStringLiteral("output/%1").arg(m_listingId));
+    m_outputDir = m_requestedOutputDir.isEmpty()
+        ? QDir(projectRoot()).filePath(QStringLiteral("output/%1").arg(m_listingId))
+        : QDir(m_requestedOutputDir).absolutePath();
     const QStringList dirs{m_outputDir, QDir(m_outputDir).filePath(QStringLiteral("source")),
                            QDir(m_outputDir).filePath(QStringLiteral("input")),
                            QDir(m_outputDir).filePath(QStringLiteral("result")),
@@ -425,7 +473,11 @@ void ListifyApp::callOpenAi(const QString &correction)
         }
         if (!saveResults(data, result)) return;
         m_result = result; m_busy = false; m_error.clear();
-        m_status = QStringLiteral("Listing SEO terminé. Résultats rangés et dossier ouvert."); refresh(); openOutputFolder();
+        m_status = QStringLiteral("Listing SEO terminé. Résultats rangés.");
+        writeJobStatus(QStringLiteral("complete"), m_status);
+        refresh();
+        if (m_headless) finishHeadless(0);
+        else openOutputFolder();
     });
 }
 
@@ -580,6 +632,9 @@ void ListifyApp::loadJob(const QString &path)
     m_artworkInput = job.value(QStringLiteral("artwork_path")).toString().toUtf8().toStdString();
     m_profileName = job.value(QStringLiteral("profile")).toString(QStringLiteral("kindle_case"));
     m_useKeywords = job.value(QStringLiteral("use_keywords")).toBool(true);
+    m_requestedOutputDir = job.value(QStringLiteral("output_dir")).toString();
+    m_statusFile = job.value(QStringLiteral("status_file")).toString();
+    m_headless = job.value(QStringLiteral("headless")).toBool(false);
     loadProfile(); m_autoStart = true; m_status = QStringLiteral("Job Productfy chargé. Démarrage automatique...");
 }
 
@@ -611,6 +666,24 @@ QNetworkRequest ListifyApp::etsyRequest(const QUrl &url) const
 void ListifyApp::fail(const QString &stage, const QString &message)
 {
     m_busy = false; m_status = QStringLiteral("Échec à l'étape %1.").arg(stage); m_error = message; refresh();
+    writeJobStatus(QStringLiteral("failed"), m_status + QLatin1Char(' ') + message);
+    if (m_headless) finishHeadless(1);
+}
+
+void ListifyApp::writeJobStatus(const QString &state, const QString &message)
+{
+    if (m_statusFile.isEmpty()) return;
+    const QJsonObject status{{QStringLiteral("state"), state},
+        {QStringLiteral("message"), message}, {QStringLiteral("listing_id"), m_listingId},
+        {QStringLiteral("output_dir"), m_outputDir},
+        {QStringLiteral("updated_at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}};
+    writeBytes(m_statusFile, QJsonDocument(status).toJson(QJsonDocument::Indented));
+}
+
+void ListifyApp::finishHeadless(int exitCode)
+{
+    m_headlessExitCode = exitCode;
+    if (m_headlessLoop) QTimer::singleShot(0, m_headlessLoop, &QEventLoop::quit);
 }
 
 void ListifyApp::refresh() { if (m_screen) m_screen->PostEvent(Event::Custom); }

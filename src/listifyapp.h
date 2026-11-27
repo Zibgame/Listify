@@ -8,6 +8,8 @@
 #include <QUrl>
 #include <ftxui/component/screen_interactive.hpp>
 
+class QEventLoop;
+
 class ListifyApp : public QObject {
     Q_OBJECT
 public:
@@ -28,6 +30,7 @@ private:
     void fetchInventory();
     void fetchImageIndex();
     void downloadNextImage();
+    void metadataPartFinished(const QString &error = QString());
     void callOpenAi(const QString &correction = QString());
     bool prepareOutput();
     bool saveResults(const QByteArray &rawResponse, const SeoResult &result);
@@ -38,6 +41,8 @@ private:
     QString productBrief() const;
     QNetworkRequest etsyRequest(const QUrl &url) const;
     void fail(const QString &stage, const QString &message);
+    void writeJobStatus(const QString &state, const QString &message);
+    void finishHeadless(int exitCode);
 
     QNetworkAccessManager m_network;
     ftxui::ScreenInteractive *m_screen = nullptr;
@@ -53,12 +58,17 @@ private:
     QString m_status = QStringLiteral("Prêt. Collez un lien Etsy ou ouvrez un job Productfy.");
     QString m_error;
     QString m_outputDir;
+    QString m_requestedOutputDir;
+    QString m_statusFile;
     QString m_shopName;
     QJsonObject m_listing;
     QJsonObject m_inventory;
     QVector<QUrl> m_imageUrls;
     QVector<DownloadedImage> m_images;
     int m_downloadIndex = 0;
+    int m_metadataPending = 0;
+    int m_pendingImageDownloads = 0;
+    QString m_metadataError;
     int m_aiAttempt = 0;
     qint64 m_totalInputTokens = 0;
     qint64 m_totalCachedTokens = 0;
@@ -67,5 +77,8 @@ private:
     bool m_proxyConfigured = false;
     bool m_busy = false;
     bool m_autoStart = false;
+    bool m_headless = false;
+    int m_headlessExitCode = 0;
+    QEventLoop *m_headlessLoop = nullptr;
     SeoResult m_result;
 };

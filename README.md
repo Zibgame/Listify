@@ -6,8 +6,8 @@ Application Windows C++17 / Qt 6 / FTXUI qui transforme un lien Etsy et un artwo
 
 1. Reçoit manuellement un lien Etsy et un PNG, ou automatiquement un job créé par Productfy.
 2. Extrait l'identifiant stable depuis `/listing/<id>`.
-3. Interroge exclusivement Etsy Open API v3 via le proxy obligatoire pour récupérer la fiche et vérifier la boutique. Listify tente aussi de lire le catalogue réel de variantes Device/Style ; Etsy exige un jeton OAuth pour cet endpoint et le brief indique clairement « indisponible » si ce jeton manque.
-4. Télécharge, toujours via le proxy, les trois premières images classées par Etsy. Si la fiche en contient une ou deux, Listify utilise seulement celles disponibles.
+3. Interroge exclusivement Etsy Open API v3 via le proxy obligatoire pour récupérer la fiche et vérifier la boutique. Après la fiche principale, la boutique, l'inventaire et l'index des images sont demandés simultanément. Listify tente aussi de lire le catalogue réel de variantes Device/Style ; Etsy exige un jeton OAuth pour cet endpoint et le brief indique clairement « indisponible » si ce jeton manque.
+4. Télécharge, toujours via le proxy, jusqu'aux trois premières images simultanément. L'ordre Etsy original est conservé dans le prompt et dans les fichiers.
 5. Archive les données et images sources avant l'appel IA.
 6. Envoie à OpenAI l'artwork Productfy, les images Etsy, les données de la fiche, le prompt du profil et les keywords facultatifs.
 7. Valide strictement la sortie (titre 105–130 caractères, description d'au moins 500 mots, 13 tags, alt text 450–500 caractères). Une seconde tentative corrective est automatique si le premier résultat ne respecte pas le contrat.
@@ -106,5 +106,7 @@ Ou directement avec des arguments :
 ```powershell
 .\dist\Listify.exe --url "https://www.etsy.com/listing/123/example" --artwork "C:\chemin\artwork.png"
 ```
+
+Productfy utilise `--job <fichier.json> --headless`. Dans ce mode, Listify n'ouvre aucun second TUI, écrit un statut JSON atomique et retourne `0` seulement lorsque tous les fichiers SEO sont validés.
 
 Le lanceur racine doit rester à côté du dossier `dist`.
